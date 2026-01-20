@@ -6,7 +6,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -17,23 +16,26 @@ import (
 var ctx = context.Background()
 
 func main() {
+	// Carrega o .env apenas localmente. No Render ele vai ignorar se o arquivo não existir.
 	godotenv.Load()
 
-	// 1. Database Connection (Postgres)
+	// 1. Configuração do Postgres
 	db, err := sql.Open("postgres", os.Getenv("DATABASE_URL"))
 	if err != nil {
-		log.Fatal("Postgres connection error:", err)
+		log.Fatal("Erro na conexão com Postgres:", err)
 	}
 	defer db.Close()
 
-	// 2. Cache Connection (Redis)
+	// 2. Configuração do Redis (Key-Value no Render)
 	redisURL := os.Getenv("REDIS_URL")
 	if redisURL == "" {
 		redisURL = "redis://localhost:6379"
 	}
+
 	opt, err := redis.ParseURL(redisURL)
 	if err != nil {
-		log.Fatal("Redis URL error:", err)
+		log.Printf("Erro ao processar REDIS_URL: %v. Usando padrão localhost.", err)
+		opt = &redis.Options{Addr: "localhost:6379"}
 	}
 	rdb := redis.NewClient(opt)
 
@@ -42,36 +44,31 @@ func main() {
 	r.Static("/static", "./static")
 
 	r.GET("/", func(c *gin.Context) {
-		// A. Save the visit in Postgres (The source of truth)
+		// A. Salva a visita no Postgres (Sempre o registro oficial)
 		_, err := db.Exec("INSERT INTO visits DEFAULT VALUES")
 		if err != nil {
-			log.Println("Postgres Insert Error:", err)
+			log.Println("Erro ao inserir no Postgres:", err)
 		}
 
-		// B. Try to get and increment the count in Redis
-		// If the key doesn't exist, we fetch from DB and save to Redis
-		val, err := rdb.Get(ctx, "total_visits").Int()
+		// B. Incrementa no Redis e já pega o novo valor
+		newVal, err := rdb.Incr(ctx, "total_visits").Result()
 
-		if err == redis.Nil {
-			// Cache Miss: Redis is empty, ask Postgres
-			log.Println("Cache Miss! Fetching count from Postgres...")
-			err = db.QueryRow("SELECT COUNT(*) FROM visits").Scan(&val)
-			if err != nil {
-				c.String(http.StatusInternalServerError, "Database Error")
-				return
+		// C. Sincronização: Se o Redis retornou 1, pode ser que ele tenha resetado.
+		// Vamos conferir no Postgres o total real.
+		if newVal == 1 {
+			var realCount int64
+			err := db.QueryRow("SELECT COUNT(*) FROM visits").Scan(&realCount)
+			if err == nil && realCount > 1 {
+				rdb.Set(ctx, "total_visits", realCount, 0)
+				newVal = realCount
+				log.Println("Redis sincronizado com o total do Postgres")
 			}
-			// Store in Redis for 10 minutes to keep it fresh
-			rdb.Set(ctx, "total_visits", val, 10*time.Minute)
-		} else {
-			// Cache Hit: Just increment the number in Redis
-			log.Println("Cache Hit! Using Redis data...")
-			val++ // Increment local variable for display
-			rdb.Incr(ctx, "total_visits")
 		}
 
-		// C. Render the HTML
+		log.Printf("Visita registrada! Total: %d", newVal)
+
 		c.HTML(http.StatusOK, "index.html", gin.H{
-			"total_visits": val,
+			"total_visits": newVal,
 		})
 	})
 
@@ -79,7 +76,6 @@ func main() {
 	if port == "" {
 		port = "8000"
 	}
-	log.Printf("App running on port %s", port)
 	r.Run(":" + port)
 }
 
