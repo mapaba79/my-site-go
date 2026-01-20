@@ -1,77 +1,85 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
-	_ "github.com/lib/pq" // Load the Postgres driver
+	_ "github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
 )
 
+var ctx = context.Background()
+
 func main() {
-	// Load environment variables from .env file for local development
 	godotenv.Load()
 
-	// 1. Retrieve the Database URL from environment variables
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		log.Fatal("DATABASE_URL environment variable is not set!")
-	}
-
-	// 2. Establish a connection to the database
-	db, err := sql.Open("postgres", dbURL)
+	// 1. Database Connection (Postgres)
+	db, err := sql.Open("postgres", os.Getenv("DATABASE_URL"))
 	if err != nil {
-		log.Fatal("Failed to connect to the database:", err)
+		log.Fatal("Postgres connection error:", err)
 	}
 	defer db.Close()
 
-	// 3. Initialize the database schema
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS visits (
-		id SERIAL PRIMARY KEY,
-		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-	)`)
-	if err != nil {
-		log.Fatal("Failed to create table:", err)
+	// 2. Cache Connection (Redis)
+	redisURL := os.Getenv("REDIS_URL")
+	if redisURL == "" {
+		redisURL = "redis://localhost:6379"
 	}
+	opt, err := redis.ParseURL(redisURL)
+	if err != nil {
+		log.Fatal("Redis URL error:", err)
+	}
+	rdb := redis.NewClient(opt)
 
 	r := gin.Default()
-
-	// 4. Configure templates and static file serving
-	r.LoadHTMLGlob("templates/*")   // Points to your HTML files
-	r.Static("/static", "./static") // Points to your CSS/JS files
+	r.LoadHTMLGlob("templates/*")
+	r.Static("/static", "./static")
 
 	r.GET("/", func(c *gin.Context) {
-		// 5. Register a new visit in the database
+		// A. Save the visit in Postgres (The source of truth)
 		_, err := db.Exec("INSERT INTO visits DEFAULT VALUES")
 		if err != nil {
-			c.String(http.StatusInternalServerError, "Internal Server Error: Could not save visit")
-			return
+			log.Println("Postgres Insert Error:", err)
 		}
 
-		// 6. Retrieve the total count of visits
-		var total int
-		err = db.QueryRow("SELECT COUNT(*) FROM visits").Scan(&total)
-		if err != nil {
-			c.String(http.StatusInternalServerError, "Internal Server Error: Could not retrieve data")
-			return
+		// B. Try to get and increment the count in Redis
+		// If the key doesn't exist, we fetch from DB and save to Redis
+		val, err := rdb.Get(ctx, "total_visits").Int()
+
+		if err == redis.Nil {
+			// Cache Miss: Redis is empty, ask Postgres
+			log.Println("Cache Miss! Fetching count from Postgres...")
+			err = db.QueryRow("SELECT COUNT(*) FROM visits").Scan(&val)
+			if err != nil {
+				c.String(http.StatusInternalServerError, "Database Error")
+				return
+			}
+			// Store in Redis for 10 minutes to keep it fresh
+			rdb.Set(ctx, "total_visits", val, 10*time.Minute)
+		} else {
+			// Cache Hit: Just increment the number in Redis
+			log.Println("Cache Hit! Using Redis data...")
+			val++ // Increment local variable for display
+			rdb.Incr(ctx, "total_visits")
 		}
 
-		// 7. Render the index.html template with data
+		// C. Render the HTML
 		c.HTML(http.StatusOK, "index.html", gin.H{
-			"total_visits": total,
+			"total_visits": val,
 		})
 	})
 
-	// 8. Start the server on the specified port
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8000"
 	}
-
-	log.Printf("Server starting on port %s", port)
+	log.Printf("App running on port %s", port)
 	r.Run(":" + port)
 }
 
