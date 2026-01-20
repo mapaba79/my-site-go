@@ -1,0 +1,19 @@
+# Logic: Ignore the .env file containing secrets
+.env
+
+# Logic: Ignore compiled binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+main
+
+# Logic: Ignore OS-specific files
+.DS_Store
+Thumbs.db
+
+# Logic: Ignore IDE settings
+.vscode/
+.idea/

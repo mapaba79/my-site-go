@@ -7,61 +7,71 @@ import (
 	"os"
 
 	"github.com/gin-gonic/gin"
-	_ "github.com/lib/pq" // O '_' serve para carregar o driver sem chamá-lo diretamente
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq" // Load the Postgres driver
 )
 
 func main() {
-	// 1. Pega a URL do banco das variáveis de ambiente
+	// Load environment variables from .env file for local development
+	godotenv.Load()
+
+	// 1. Retrieve the Database URL from environment variables
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		log.Fatal("A variável DATABASE_URL não está configurada!")
+		log.Fatal("DATABASE_URL environment variable is not set!")
 	}
 
-	// 2. Abre a conexão com o banco
+	// 2. Establish a connection to the database
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
-		log.Fatal("Erro ao conectar ao banco:", err)
+		log.Fatal("Failed to connect to the database:", err)
 	}
 	defer db.Close()
 
-	// 3. Cria uma tabela de teste se ela não existir
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS visitas (
+	// 3. Initialize the database schema
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS visits (
 		id SERIAL PRIMARY KEY,
-		data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	)`)
 	if err != nil {
-		log.Fatal("Erro ao criar tabela:", err)
+		log.Fatal("Failed to create table:", err)
 	}
 
 	r := gin.Default()
 
+	// 4. Configure templates and static file serving
+	r.LoadHTMLGlob("templates/*")   // Points to your HTML files
+	r.Static("/static", "./static") // Points to your CSS/JS files
+
 	r.GET("/", func(c *gin.Context) {
-		// 4. Insere uma nova visita toda vez que alguém acessa a rota "/"
-		_, err := db.Exec("INSERT INTO visitas DEFAULT VALUES")
+		// 5. Register a new visit in the database
+		_, err := db.Exec("INSERT INTO visits DEFAULT VALUES")
 		if err != nil {
-			c.String(http.StatusInternalServerError, "Erro ao salvar no banco")
+			c.String(http.StatusInternalServerError, "Internal Server Error: Could not save visit")
 			return
 		}
 
-		// 5. Conta o total de visitas para exibir na tela
+		// 6. Retrieve the total count of visits
 		var total int
-		err = db.QueryRow("SELECT COUNT(*) FROM visitas").Scan(&total)
+		err = db.QueryRow("SELECT COUNT(*) FROM visits").Scan(&total)
 		if err != nil {
-			c.String(http.StatusInternalServerError, "Erro ao ler do banco")
+			c.String(http.StatusInternalServerError, "Internal Server Error: Could not retrieve data")
 			return
 		}
 
-		c.JSON(http.StatusOK, gin.H{
-			"status":        "online",
-			"mensagem":      "Visita registrada no Postgres!",
-			"total_visitas": total,
+		// 7. Render the index.html template with data
+		c.HTML(http.StatusOK, "index.html", gin.H{
+			"total_visits": total,
 		})
 	})
 
+	// 8. Start the server on the specified port
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8000"
 	}
+
+	log.Printf("Server starting on port %s", port)
 	r.Run(":" + port)
 }
 
